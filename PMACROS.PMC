@@ -1,0 +1,25 @@
+Trigger: "i("
+Mode: 0,1,0,1,0
+ "if (@0)\n"
+ "  {@1\n"
+   "}\n"
+ "\belse\n"
+ "  {@2\n"
+   "}"
+
+Trigger: "hc"
+Mode: 0,1,0,1,0
+ "hide_cursor();\n@0"
+
+Trigger: "sc"
+Mode: 0,1,0,1,0
+ "show_cursor();\n@0"
+
+
+Trigger: "ms"
+Mode: 0,1,0,1,0
+ "msgbox(ID_OK,MODAL,\"@0\");"
+
+
+
+
