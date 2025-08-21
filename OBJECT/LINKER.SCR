@@ -1,0 +1,11 @@
+ENTRY (START)
+SECTIONS {
+  .text 0x10000: { *(text)}
+
+  .data 0x10000 + SIZEOF(.text):
+     AT (ADDR(.text) + SIZEOF(.text))
+     { *(data)}
+
+  .bss 0x10000 + SIZEOF(.text) + SIZEOF(.data):
+     { *(bss)}
+}

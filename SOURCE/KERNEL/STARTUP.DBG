@@ -1,0 +1,153 @@
+;/************************************************************************/
+;/* Sky Operating System V2.0j
+;/* Copyright (c) 1996 -1998 by Szeleney Robert
+;/*
+;/* Project Members: Szeleney Robert
+;/*                  Resl Christian
+;/*                  Hayrapetian Gregory
+;/************************************************************************/
+;/* File       : kernel\startup.asm
+;/* Last Update: 12.11.1998
+;/* Version    : beta
+;/* Coded by   : Szeleney Robert
+;/* Docus      : Internet, Linux, Minix, all other operating systems,...
+;/************************************************************************/
+;/* Definition:
+;/*   Initial startup code. 16 Bit.
+;/*   Loaded at adress 0x90000
+;/*   Segment is 0x9000
+;/*   Offset  is 0
+;/*   Initalizes Protected Mode and Jumps to System at adress 0x10000
+;/*
+;/* Bugs:
+;/*   Warning! File must not be greater than 1 Sector
+;/*   Modify Bootcode and Setup to solve this problem
+;/************************************************************************/
+;org 0x00
+MEMORY_EXTENDED equ 0x80000
+[bits 16]
+jmp start16
+
+
+;Routine to print str at DS:SI to screen using int 0x10
+prtstr:	lodsb
+	and	al,al
+	jz	fin
+	call	prtchr
+	jmp	prtstr
+fin:	ret
+
+; Space printing
+
+prtsp2:	call	prtspc		; Print double space
+prtspc:	mov	al,0x20	        ; Print single space (fall-thru!)
+
+prtchr:	push	ax
+	push	cx
+	xor	bh,bh
+	mov	cx,0x01
+	mov	ah,0x0e
+	int	0x10
+	pop	cx
+	pop	ax
+	ret
+
+beep:	mov	al,0x07
+	jmp	prtchr
+
+
+start16:
+  cli
+;we know cs = 0x9000, set ds and es
+  mov ax, cs
+  mov ds, ax
+  mov es, ax
+  mov ss, ax
+  mov sp, 0xFFF0
+  mov bp, 0xFFF0
+
+  mov bx, 511
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  add bx, 1
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  add bx, 1
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  add bx, 1
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  add bx, 1
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  add bx, 1
+  mov byte al, [ds:bx]
+  cmp al, 'o'
+  jne not_ok
+
+  push bx
+  mov si, msg_ok
+  call prtstr
+  pop bx
+
+  stop: jmp stop
+
+not_ok:
+  mov si, msg_nok
+  call prtstr
+
+msg_ok  db "next sector ok",13,10,0
+msg_nok db "next sector not ok",13,10,0
+
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+db "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+
+

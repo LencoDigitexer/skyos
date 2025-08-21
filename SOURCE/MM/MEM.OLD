@@ -1,0 +1,645 @@
+/************************************************************************/
+/* Sky Operating System V2
+/* Copyright (c) 1996 by Szeleney Robert
+/*
+/* Project Members: Szeleney Robert
+/*                  Resl Christian
+/*                  Hayrapetian Gregory
+/************************************************************************/
+/* File       : kernel\list.c
+/* Last Update: 04.11.1998
+/* Version    : beta
+/* Coded by   : Hayrapetian Gregory
+/* Docus from : PC Intern 5, Moderne Betriebssysteme, Internet
+/************************************************************************/
+/* Definition:
+/*   This file implements the memory manager.
+/*   Main functions:                                                          */
+/*           - valloc: Allocates a size of memory                           */
+/*           - vfree: Frees an allocation                                   */
+/*           - get_freemem: Returns the number of memory available          */
+/*           - memstat: Displays all allocations and free spaces            */
+/*           - memlist: Shows how much memory a task has reserved           */
+/*                                                                          */
+/*   All other functions are used by the memory manager, and should not       */
+/*   be called by an other task.                                              */
+/****************************************************************************/
+#include "sched.h"
+#include "system.h"
+
+#define NULL (void*)0
+
+#define KERNEL_DMS_START 0x20000  /* KERNEL_DYNAMIC_MEMORY_SPACE
+                                     should be far behind the kernel */
+
+#define PAGE_DIR 0x1000
+
+#define KERNEL   -1
+#define RESERVED -9
+
+#define MAX_MEM   20
+
+extern struct task_struct *current;
+
+struct sysmem_entry             /* System Memory Table entry */
+{
+  int start;
+  int end;
+  int owner;
+};
+
+struct pt_entry                 /* Page Table entry */
+{
+   int entry;
+};
+
+struct kernelmem_entry          /* Entry for one allocated memory block of */
+{                               /* the kernel */
+  int start;
+  int end;
+  struct kernelmem_entry *next;
+  struct kernelmem_entry *last;
+};
+
+struct sysmem_entry sysmem_table[MAX_MEM] = {0};
+
+struct kernelmem_entry *km = NULL;
+int memstart;
+
+// ***************************************
+struct mem_list
+{
+  int pid;
+  unsigned int start, end;
+  struct mem_list *next;
+  struct mem_list *prev;
+};
+
+struct mem_list *res_list, *free_list;
+char memmap[1024];  /* for kvalloc(); 8192 blocks with x bytes */
+volatile int map_count = 0;  /* using for NEXT FIT method */
+
+#define BLOCK_SIZE 20
+#define BLOCK_NUM  8192
+
+/*
+ * Insert a new mem_list element
+ */
+struct mem_list *ins_list(unsigned int start, unsigned int end,struct mem_list *list)
+{
+ struct mem_list *l;
+ int flags;
+
+ l = (struct mem_list *) kvalloc(sizeof(struct mem_list));
+ l->next  = l->prev  = NULL;
+ l->start = start;
+ l->end   = end;
+ l->pid   = current->pid;
+
+ if (list == NULL)
+ {
+  l->prev = l;
+  list = l;
+ }
+ else
+ {
+  l->prev = list->prev;
+  list->prev->next = l;
+  list->prev = l;
+ }
+
+ return list;
+}
+
+/*
+ * Delete a mem_list element
+ */
+struct mem_list *del_list(struct mem_list *l,struct mem_list *list)
+{
+ int flags;
+
+ if (l->prev->next)
+ {
+  l->prev->next = l->next;
+
+  if (l->next) l->next->prev = l->prev;
+  else list->prev = l->prev;
+ }
+ else
+ {
+  if (l->next)
+  {
+   l->next->prev = l->prev;
+   list = l->next;
+  }
+  else list = NULL;
+ }
+
+ kvfree(l);
+ return list;
+}
+
+/*
+ * Insert a new mem_list element in free_list, sort by address
+ * Merge rooms
+ */
+void ins_list_sort(unsigned int start, unsigned int end)
+{
+ struct mem_list *l, *f;
+ char merge = 0;
+ int flags;
+
+ f = free_list;
+
+ if (f == NULL)
+ {
+   free_list = ins_list(start,end,free_list);
+   return;
+ }
+
+ if (start >= free_list->start)
+ {
+   while (start >= f->start) f = f->next;
+
+   if (end + 1 == f->start)
+   {
+    f->start = start;
+    end      = f->end;
+    merge    = 1;
+   }
+
+   f = f->prev;
+   if (f->end + 1 == start)
+   {
+    f->end = end;
+    f = f->next;
+    if (merge) free_list = del_list(f, free_list);
+    else merge = 1;
+   }
+
+   if (!merge)
+   {
+    l = (struct mem_list *) kvalloc(sizeof(struct mem_list));
+    l->next = l->prev = NULL;
+    l->start = start;
+    l->end   = end;
+
+    l->next = f->next;
+    f->next->prev = l;
+    l->prev = f;
+    f->next = l;
+    if (!l->next) l->next->prev = l;
+   }
+ }
+ else
+ {
+  if (end + 1 == free_list->start) free_list->start = start;
+  else
+  {
+   l = (struct mem_list *) kvalloc(sizeof(struct mem_list));
+   l->next = l->prev = NULL;
+   l->start = start;
+   l->end   = end;
+
+   l->prev = free_list->prev;
+   free_list->prev = l;
+   l->next = free_list;
+   free_list = l;
+  }
+ }
+
+}
+
+/*
+ * Allocates a size of memory
+ * Uses LAST FIT method
+ */
+unsigned int valloc(unsigned int size)
+{
+ struct mem_list *f = free_list->prev;
+ unsigned int ptr;
+ int flags;
+
+ if (size < 1) return 0;
+
+ do
+ {
+  if (size <= (f->end - f->start + 1))
+  {
+   save_flags(flags);
+   cli();
+
+   res_list = ins_list(f->start,f->start + size - 1,res_list);
+   ptr = f->start;
+   f->start += size;
+   if (f->start > f->end) free_list = del_list(f,free_list);
+
+   restore_flags(flags);
+
+   return ptr;
+  }
+  f = f->prev;
+ } while (f != free_list);
+
+ printk("mem.c: valloc() - Out of memory");
+ return 0;
+}
+
+/*
+ * Frees an allocation
+ * Look from last to first memory entry
+ */
+int vfree(unsigned int ptr)
+{
+ struct mem_list *r;
+ int i, j;
+ int flags;
+
+ r = res_list->prev;
+
+ save_flags(flags);
+ cli();
+
+ while ((r != res_list) && (r->start != ptr)) r = r->prev;
+
+ if (r->start != ptr)
+ {
+  printk("mem.c: vfree() - Wrong address to free: %d",ptr);
+  restore_flags(flags);
+
+  return -1;
+ }
+
+ ins_list_sort(r->start, r->end);
+ res_list = del_list(r, res_list);
+ map_count--;
+ restore_flags(flags);
+
+ return 0;
+}
+
+int set_memmap(unsigned int block, char bit)
+{
+ if (get_memmap(block) != bit)
+     memmap[block >> 3] ^= (1 << (block % 8));
+
+ return 1;
+}
+
+int get_memmap(unsigned int block)
+{
+ return (memmap[block>>3] >> (block % 8)) & 1;
+}
+
+unsigned int kvalloc(unsigned int size)
+{
+ // base adr: 0x200000
+ unsigned int block = map_count;
+
+ while (get_memmap(block) != 0 && (block < 8192)) block++;
+ if (block == 8192)
+ {
+   printk("mem.c: kvalloc - Bitmap full  Counter: %d",map_count);
+   return -1;
+ }
+
+ set_memmap(block,1);
+ map_count = block+1;
+ if (map_count >= 8192)
+   map_count = 0;
+
+ return 0x200000 + (block * BLOCK_SIZE);   /*  block*BLOCK_SIZE  */
+}
+
+int kvfree(unsigned int ptr)
+{
+ unsigned int block = (ptr - 0x200000) / BLOCK_SIZE;
+
+ set_memmap(block,0);
+}
+
+unsigned int getmem()
+{
+  return memstart;
+}
+
+unsigned int get_freemem()
+{
+ struct mem_list *f = free_list;
+ unsigned int mem=0;
+
+ while (f)
+ {
+   mem += f->end - f->start + 1;
+   f = f->next;
+ }
+
+ return mem;
+}
+
+void memstat()
+{
+ struct mem_list *r = res_list;
+ struct mem_list *f = free_list;
+ int i;
+
+ printk("");
+ printk("res_list:");
+ while (r)
+ {
+  printk("start: %d  end: %d",r->start,r->end);
+  r = r->next;
+ }
+
+ printk("free_list:");
+ while (f)
+ {
+  printk("start: %d  end: %d",f->start,f->end);
+  f = f->next;
+ }
+
+ printk("Memory free: %d",get_freemem());
+
+}
+
+void memlist()
+{
+ struct task_struct *task;
+ struct mem_list *r;
+
+ unsigned int i,mem;
+
+ printk("Task memory list:");
+
+ for (i=0;i<20;i++)
+ {
+   if ((task = GetTask(i)) != NULL)
+   {
+     mem = 0;
+     r = res_list;
+
+     while (r)
+     {
+       if (r->pid == task->pid)
+          mem += r->end - r->start + 1;
+       r = r->next;
+     }
+
+     printk("Task %02d:  %004d bytes reserved",task->pid,mem);
+   }
+ }
+
+}
+
+void page_alloc()
+{
+ unsigned int i, *ptr_dir, *ptr_tbl =
+
+ ptr_tbl = (unsigned int*) 0x3000;
+ ptr_dir = (unsigned int*) 0x1000;
+
+ for (i=1;i<=1024;i++)
+ {
+   *ptr_tbl = 0x3ff007 + i*4096;
+   ptr_tbl++;
+ }
+
+ ptr_dir += 769;
+ *ptr_dir = (unsigned int) 0x3007;
+}
+
+// ***************************************
+
+
+
+int sysmem_newentry(int start, int end, int owner)
+{
+  int i=0;
+
+  while ((i<MAX_MEM) && (sysmem_table[i].owner != 0))
+    i++;
+
+  if (i==MAX_MEM)
+  {
+    printk("\nmem.c: No system memory slots available.\n");
+    return -1;
+  }
+
+  sysmem_table[i].owner = owner;
+  sysmem_table[i].start = start;
+  sysmem_table[i].end   = end;
+  return 0;
+}
+
+
+unsigned int kalloc(unsigned int size)
+{
+  unsigned int base;
+
+  base = memstart;
+  memstart += size;
+
+  return base;
+}
+
+void kfree(unsigned int pointer)
+{
+}
+
+
+void mem_init(void)
+{
+  int i;
+
+  printk("mem.c: Initializing memory manager...\n");
+
+  memstart = 0x200000 + BLOCK_NUM*BLOCK_SIZE;  // 0x200000 - 0x228000 for kvalloc()
+
+  //init_rmem(memstart);
+  printk("mem.c: memstart at 0x%00000008x",memstart);
+
+// **************************************************
+  for (i=0;i<1024;i++)
+     memmap[i] = 0;
+
+  page_alloc();
+  res_list = free_list = NULL;
+  free_list = ins_list(0x250000,0x7fffff,free_list);
+// **************************************************
+
+}
+
+void mem_update_startaddr(int startaddr)
+{
+  memstart = startaddr;
+}
+
+void dump_kernel_mem(void)
+{
+   int i;
+   struct kernelmem_entry *entry;
+
+   entry = km;
+
+   printk("Dumping kernel memory: \n\n");
+   printk("--------------------------------------------------------------------------\n");
+   printk("Start      | End         \n");
+   printk("--------------------------------------------------------------------------\n");
+   if (entry == NULL) return;
+   do
+   {
+      printk("0x%00000008x | 0x%00000008x\n",
+      entry->start, entry->end);
+   } while(entry->next != NULL);
+   printk("\n");
+}
+
+
+void dump_system_mem_table(void)
+{
+   int i;
+
+   printk("Dumping system memory slots: \n\n");
+   printk("--------------------------------------------------------------------------\n");
+   printk("Start      | End         | Owner                                        \n");
+   printk("--------------------------------------------------------------------------\n");
+   for (i = 0; i< MAX_MEM; i++)
+   {
+     printk("0x%00000008x | 0x%00000008x | 0x%00000008x\n",
+    sysmem_table[i].start,
+    sysmem_table[i].end,
+    sysmem_table[i].owner );
+   }
+   printk("\n");
+}
+
+/************************************************************************/
+/* Page Table Functions
+/************************************************************************/
+unsigned int getpt_entry(unsigned int base, int entry)
+{
+  unsigned int *pointer;
+  unsigned int value;
+
+  if (base == 0)
+  {
+     pointer = (unsigned int*) PAGE_DIR + entry;
+     return (*pointer);
+  }
+  else
+  {
+     base = base >> 11;
+     base = base << 11;
+
+     pointer = (unsigned int*) base + entry;
+     return (*pointer);
+  }
+}
+
+void setpt_entry(unsigned int base, int entry, unsigned int v)
+{
+  unsigned int *pointer;
+  unsigned int value;
+
+  if (base == 0)
+  {
+     pointer = (unsigned int*) PAGE_DIR + entry;
+     *pointer = v;
+  }
+  else
+  {
+     base = base >> 11;
+     base = base << 11;
+
+     pointer = (unsigned int*) base + entry;
+     *pointer = v;
+  }
+}
+
+
+void dump_page_directory(void)
+{
+   int i,j;
+   char ch=0;
+
+   printk("Dumping page directory at 0x1000: \n\n");
+   printk("--------------------------------------------------------------------------\n");
+   printk("Table | Adress \n");
+   printk("--------------------------------------------------------------------------\n");
+   for (i = 0; i< 7; i++)
+   {
+     printk("%00005d  | 0x%00000008x\n",i, getpt_entry(0,i));
+   }
+
+   printk("Dumping page table at 0x2000: \n\n");
+   printk("--------------------------------------------------------------------------\n");
+   printk("Table | Adress \n");
+   printk("--------------------------------------------------------------------------\n");
+
+   i=0;
+
+   while (ch!=27)
+   {
+     for (j=0;j<=15;j++)
+       printk("%00005d  | 0x%00000008x\n",i+j, getpt_entry(1,i+j));
+
+     i = j;
+
+     ch = getch();
+   }
+   printk("\n");
+}
+
+void dump_pagetable(void)
+{
+   int i,j,k;
+   struct twm_window w={0};
+   char ch=0;
+   char str[255];
+
+   w.x = 500;
+   w.length = 250;
+   w.y = 140;
+   w.heigth = 440;
+   strcpy(w.title,"Page Tables");
+   w.actx = 5;
+   w.acty = 30;
+
+   draw_window(&w);
+
+   i = 0;
+   k = 0;
+   while (ch != 27)
+   {
+      clear_window(&w);
+      out_window(&w,"Page Typ: Directory");
+
+      out_window(&w,"Index   Address");
+      for (i=0;i<=35;i++)
+      {
+         sprintf(str,"%0004d:    %00000008x",k,getpt_entry(0,k));
+         out_window(&w, str);
+         k++;
+      }
+      ch = getch();
+      if (ch=='1')
+        k = 100;
+      if (ch=='2')
+        k = 200;
+      if (ch=='3')
+        k = 300;
+      if (ch=='4')
+        k = 400;
+      if (ch=='5')
+        k = 500;
+      if (ch=='6')
+        k = 600;
+      if (ch=='7')
+        k = 700;
+      if (ch=='8')
+        k = 800;
+      if (ch=='9')
+        k = 900;
+   }
+}
+

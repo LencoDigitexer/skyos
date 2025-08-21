@@ -1,0 +1,19 @@
+New features since last version:
+=================================
+
+Last Update: 09th, february 2000
+
+These parts were added/updated:
+================================================================
+- IDE Drivers supports now extended partitions
+- SkyFileManager V1.0
+- SkyPad V1.0
+- FAT12/16 supports now sub-directories (read only)
+- FAT Filesystem cluster caching
+- Debugger/Disassembler V1.0
+- Listbox control (with slidebar)
+- Menu is now controlable with keys
+- Cache for all Blockdevices (LRU)
+- Cache Statistic Viewer V1.0
+- Mapfile loader (If an exception occure, you can see which function
+                  caused the exception)

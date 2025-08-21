@@ -1,0 +1,601 @@
+/***************************************************************************/
+/* SKY Systems Setup                                                       */
+/***************************************************************************/
+/* Project Members: þ Christian Resl 12.11.1979                            */
+/*                    Username: Chris                                      */
+/*                  þ Robert Szeleney 04.06.1980                           */
+/*                    Username: Bertl                                      */
+/***************************************************************************/
+/* File:        SETUP.CPP (SETUP.EXE)                                      */
+/* Subfiles:    BOOTCODE.ASM (BOOTCODE.DAT)                                */
+/*              SKYOS.ASM (SKYOS.SYS)                                      */
+/* Descrition:  Sets up the SKY-Filesystem on the Drive which the user     */
+/*              selected.                                                  */
+/* Attetion:    Setup cannot be run under Windows 3.x / 95 / NT because    */
+/*              Setup needs direct access to the harddisk.                 */
+/***************************************************************************/
+/* Created:     08.04.1997                                                 */
+/* Last Update: 04.10.1997                                                 */
+/***************************************************************************/
+
+#include <STDIO.H>
+#include <STDLIB.H>
+#include <CONIO.H>
+#include <STRING.H>
+#include <PROCESS.H>
+#include <FCNTL.H>
+#include <BIOS.H>
+#include <IO.H>
+#include <DOS.H>
+
+#define HEADLINE       "SKY Systems Setup 2.00b"
+
+#define MAX_TRY        0x05           // Versuchsanzahl bei Laufwerksfehler
+#define SECTOR_SIZE    0x02           // 512 Bytes
+#define PARTITION_TYP  0x07           // HPFS bzw. NTFS bzw. SKYFS
+#define FILE_SYSTEM    "SKYFS   "     // SKYFS
+
+#define BOOTCODE_FILE  "C:\\SKY\\SYSTEM\\BOOTCODE.DAT"
+#define KERNEL_FILE    "C:\\SKY\\object\\kernel.sys"
+#define STARTUP_FILE   "C:\\SKY\\object\\startup.o"
+#define BOOTMAN_FILE   "C:\\SKY\\SYSTEM\\BOOTMAN.DAT"
+
+typedef unsigned char BYTE;
+typedef unsigned int  WORD;
+typedef unsigned long DWORD;
+
+int krw = 0;
+int windows = 0;
+int para_drivesel = 0;
+int para_partsel = 0;
+int para_blocksel = 0;
+int para_confirm = 0;
+int para_reboot = 0;
+
+typedef struct iNodeTyp
+{
+ BYTE  Name[50];
+ BYTE  type;
+ WORD  Owner;
+ WORD  Rights;
+ BYTE  Attributes;
+ BYTE  Create[7];
+ BYTE  Access[7];
+ BYTE  Update[7];
+ DWORD Filesize;
+ DWORD Direct[8];
+ DWORD Indirect[3];
+ BYTE res[3];
+}iNodeTyp;
+
+typedef struct BootsectorTyp
+{
+ BYTE Jump[3];
+ BYTE FileSystem[8];
+ BYTE MediaTyp;
+ BYTE SectorSize;
+ BYTE MaxTrack;
+ BYTE MaxHead;
+ BYTE MaxSector;
+ BYTE BeginTrack;
+ BYTE BeginHead;
+ BYTE BeginSector;
+ BYTE EndTrack;
+ BYTE EndHead;
+ BYTE EndSector;
+ BYTE BlockSize;
+ BYTE Routine[487];
+ WORD ID_Code;
+}BootsectorTyp;
+
+// Globale Variablen
+WORD DriveNr,PartitionNr;
+WORD Head,Track,Sector;
+WORD EndHead,EndTrack,EndSector;
+WORD BlockSize;
+
+void Disk(int cmd,int drive,int head,int track,int sector,int nsects, void *buffer)
+{
+ int i;
+ for (i=0;i<MAX_TRY;i++)
+ {
+  if (biosdisk(cmd,drive,head,track,sector,nsects,buffer) == 0) return;
+ }
+ printf("\n\nERROR: Not able to read/write disksector.\n");
+ exit(1);
+}
+
+void WindowsCheck()
+{
+ union REGS regs;
+ struct SREGS sregs;
+
+ regs.x.ax=0x1600;
+ int86(0x2F,&regs,&regs);
+ if ((regs.h.al==0x00)||(regs.h.al==0x80))
+ {
+  regs.x.ax=0x4680;
+  int86(0x2F,&regs,&regs);
+  if (regs.h.al==0x80) return;
+ }
+ windows = 1;
+}
+
+void Layout()
+{
+ window(1,1,80,25);
+ textcolor(7);
+ textbackground(1);
+ clrscr();
+ gotoxy(17,1);
+ printf("%s     Windows running...",HEADLINE);
+ window(1,2,80,25);
+ textcolor(7);
+ textbackground(0);
+ clrscr();
+ window(1,3,80,25);
+}
+
+int GetNumber(char *String)
+{
+ int Number;
+ printf("%s",String);
+ clreol();
+ fflush(stdin);
+ scanf("%d",&Number);
+ gotoxy(1,wherey()-1);
+ return(Number);
+}
+
+char GetChar(char *String)
+{
+ int ch;
+ printf("%s",String);
+ clreol();
+ fflush(stdin);
+ scanf("%c",&ch);
+ gotoxy(1,wherey()-1);
+ return(ch);
+}
+
+void DriveSelection()
+{
+ int i,j=0,BIOSNr[256]={0};
+ DWORD Size;
+ union REGS regs;
+
+ for (i=0;i<256;i++)
+ {
+  regs.h.ah=8;
+  regs.h.bl=0;
+  regs.h.dl=i;
+  int86(0x13,&regs,&regs);
+  // Nur fr Rechner mit altem BIOS
+  if (regs.x.cx==0) regs.x.cflag=1;
+  if (!regs.x.cflag)
+  {
+   BIOSNr[j++]=i;
+   switch(regs.h.bl)
+   {
+    case 0:  Size=regs.h.ch+(((regs.h.cl&0x00C0)<<2)|((regs.h.dh&0x00C0)<<4));
+             Size=(Size+1)*((regs.h.dh&0x003F)+1);
+             Size=Size*(regs.h.cl&0x003F)/2048;
+             printf("%d) HDD %5lu MB\n",j,Size);break;
+    case 1:  printf("%d) FDD   360 KB\n",j);break;
+    case 2:  printf("%d) FDD   1.2 MB\n",j);break;
+    case 3:  printf("%d) FDD   720 KB\n",j);break;
+    case 4:  printf("%d) FDD  1.44 MB\n",j);break;
+    case 5:  printf("%d) FDD  2.88 MB\n",j);break;
+    default: printf("%d) Unknown Drivetyp\n",j);
+   }
+  }
+ }
+ j++;
+ printf("%d) Kernel Recieve Wizard on LPT Port\n",j);
+ if (j==0)
+ {
+  printf("\nERROR: No Diskdrives found.\n");
+  exit(1);
+ }
+ printf("\n");
+
+ if (para_drivesel)
+ {
+   printf("Automatic Parameter selection --> Drive Nr: %d",para_drivesel);
+   DriveNr = para_drivesel;
+ }
+ else
+ {
+ do DriveNr=GetNumber("Select Drive: ");
+ while ((DriveNr<1)||(DriveNr>j));
+ }
+ krw= 0;
+ if (DriveNr == j) krw = 1;
+
+ DriveNr=BIOSNr[DriveNr-1];
+ PartitionNr=0;
+ Head=0;
+ Track=0;
+ Sector=1;
+ regs.h.ah=8;
+ regs.h.dl=DriveNr;
+ int86(0x13,&regs,&regs);
+ (BYTE)EndHead=regs.h.dh;
+ (BYTE)EndTrack=regs.h.ch;
+ (BYTE)EndSector=regs.h.cl;
+}
+
+void PartitionSelection()
+{
+ int i,j=0;
+ BYTE Buffer[512];
+ DWORD *Size;
+
+ if (DriveNr>=0x80)
+ {
+  printf("\n\n");
+  Disk(2,DriveNr,0,0,1,1,&Buffer);
+  for (i=0;i<4;i++)
+  {
+   Size=(DWORD*)&Buffer[0x1CA+i*0x10];
+   if (*Size>0) printf("%d) Partition %i %5lu MB\n",++j,i+1,*Size/2048);
+  }
+  printf("\n");
+
+  if (para_partsel)
+ {
+   printf("Automatic Parameter selection --> Part. Nr: %d",para_partsel);
+   PartitionNr = para_partsel;
+ }
+ else
+ {
+  do PartitionNr=GetNumber("Select Partition: ");
+  while ((PartitionNr<1)||(PartitionNr>j));
+ }
+  (BYTE)Head=Buffer[0x1AF+PartitionNr*0x10];
+  (BYTE)Track=Buffer[0x1B1+PartitionNr*0x10];
+  (BYTE)Sector=Buffer[0x1B0+PartitionNr*0x10];
+  (BYTE)EndHead=Buffer[0x1B3+PartitionNr*0x10];
+  (BYTE)EndTrack=Buffer[0x1B5+PartitionNr*0x10];
+  (BYTE)EndSector=Buffer[0x1B4+PartitionNr*0x10];
+ }
+}
+
+void NextSector()
+{
+ union REGS regs;
+
+ Track=Track+(((Sector&0x00C0)<<2)|((Head&0x00C0)<<4));
+ Head=Head&0x003F;
+ Sector=Sector&0x003F;
+ regs.h.ah=8;
+ regs.h.dl=DriveNr;
+ int86(0x13,&regs,&regs);
+ Sector++;
+ if (Sector>(EndSector&0x003F))
+ {
+  Sector=1;
+  Head++;
+  if (Head>(EndHead&0x003F))
+  {
+   Head=0;
+   Track++;
+   if (Track>(EndTrack+(((EndSector&0x00C0)<<2)|((EndHead&0x00C0)<<4))))
+   {
+    printf("\n\nERROR: Not enough diskspace\n");
+    exit(1);
+   }
+  }
+ }
+ Head=Head+((Track>>4)&0x00C0);
+ Sector=Sector+((Track>>2)&0x00C0);
+ Track=Track&0x00FF;
+}
+
+void WriteBootsector()
+{
+ int FileHandle;
+ BootsectorTyp Buffer[1] = {0};
+
+ printf("\n\nWriting Bootsector (sec %d)...",Sector);
+ if ((FileHandle = open(BOOTCODE_FILE,O_RDONLY|O_BINARY)) == -1)
+ {
+  printf("\n\nERROR: Missing BOOTCODE.DAT\n");
+  exit(1);
+ }
+ read(FileHandle,&Buffer,512);
+ strcpy(Buffer->FileSystem,FILE_SYSTEM);
+ Buffer->MediaTyp=DriveNr;
+ Buffer->SectorSize=SECTOR_SIZE;
+ Buffer->MaxTrack=EndTrack;
+ Buffer->MaxHead=EndHead;
+ Buffer->MaxSector=EndSector;
+ Buffer->BeginTrack=Track;
+ Buffer->BeginHead=Head;
+ Buffer->BeginSector=Sector+1;
+ Buffer->EndTrack=EndTrack;
+ Buffer->EndHead=EndHead;
+ Buffer->EndSector=EndSector;
+ Buffer->BlockSize=BlockSize;
+ Disk(3,DriveNr,Head,Track,Sector,1,&Buffer);
+ NextSector();
+ close(FileHandle);
+ printf("success\n");
+}
+
+void WriteiNodes()
+{
+ int i;
+ iNodeTyp iNodeBuffer[4] = {0};
+ BYTE DataBuffer[512] = {0};
+
+ printf("Writing iNodes.......\n");
+ strcpy(iNodeBuffer[0].Name,"SKY Bootable");
+
+ strcpy(iNodeBuffer[1].Name,"START.SYS");
+ iNodeBuffer[1].Indirect[0]=0x00000002;
+
+ printf("Inode: START.SYS  at  Head: %d,  Track: %d,  Sector: %d\n",Head,Track,Sector);
+ printf("       Pointer Block at Sector 04.\n\n",Head,Track,Sector);
+
+ strcpy(iNodeBuffer[2].Name,"SKYOS.SYS");
+ iNodeBuffer[2].Indirect[0]=0x00000003;
+
+ printf("Inode: SKYOS.SYS  at  Head: %d,  Track: %d,  Sector: %d\n",Head,Track,Sector);
+ printf("       Pointer Block at Sector 05.\n\n",Head,Track,Sector);
+
+ Disk(3,DriveNr,Head,Track,Sector,1,&iNodeBuffer);
+ NextSector();
+
+ for (i=BlockSize;i>1;i--)
+ {
+   Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+   NextSector();
+ }
+ printf("\nsuccess\n");
+}
+
+void WriteKernel()
+{
+ int i,FileHandle, FH2;
+ BYTE DataBuffer[512] = {0};
+ DWORD PointerBuffer[128] = {0};
+ DWORD MaxSize;
+
+ if ((FileHandle = open(STARTUP_FILE,O_RDONLY|O_BINARY)) == -1)
+ {
+  printf("\n\nERROR: Missing");
+  printf(STARTUP_FILE);
+  exit(1);
+ }
+ if ((FH2 = open(KERNEL_FILE,O_RDONLY|O_BINARY)) == -1)
+ {
+  printf("\n\nERROR: Missing");
+  printf(KERNEL_FILE);
+  exit(1);
+ }
+ MaxSize=(DWORD)(BlockSize*512/4)*(BlockSize*512);
+ if (filelength(FileHandle) > MaxSize)
+ {
+  printf("\n\nERROR: Startup-Code is too large. Cannot keep all indirect Pointers.");
+  printf("\n       Choose a bigger Blocksize!\n");
+  exit(1);
+ }
+ if (filelength(FH2) > MaxSize)
+ {
+  printf("\n\nERROR: Kernel is too large. Cannot keep all indirect Pointers.");
+  printf("\n       Choose a bigger Blocksize!\n");
+  exit(1);
+ }
+
+ int lastsize = 0;
+
+ printf("Writing file START.SYS... Bytes: %d  Sectors: %d  Blocks: %d\n",filelength(FileHandle),
+   (filelength(FileHandle)/512) + 1, filelength(FileHandle)/(BlockSize*512)+1);
+
+ printf("Blocks to write for START.SYS (%d): ",(filelength(FileHandle)/(BlockSize*512))+1);
+ for (i=0;i<=(filelength(FileHandle)/(BlockSize*512));i++)
+ {
+   printf(".");
+
+  PointerBuffer[i]=i+4;
+  lastsize++;
+ }
+ PointerBuffer[i]=0;
+ Disk(3,DriveNr,Head,Track,Sector,1,&PointerBuffer);
+ NextSector();
+
+ for (i=BlockSize;i>1;i--)
+ {
+  Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+  NextSector();
+ }
+
+ printf("\nBlocks to write for SKYOS.SYS: %d\n",(filelength(FH2)/(BlockSize*512))+1);
+ for (i=0;i<=(filelength(FH2)/(BlockSize*512));i++)
+ {
+  PointerBuffer[i]=i+4+lastsize;
+ }
+ PointerBuffer[i]=0;
+ Disk(3,DriveNr,Head,Track,Sector,1,&PointerBuffer);
+ NextSector();
+
+ for (i=BlockSize;i>1;i--)
+ {
+  Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+  NextSector();
+ }
+ float m =filelength(FileHandle)/512;
+ float n = 0;
+ float per;
+
+ while (!eof(FileHandle))
+ {
+//  per = (100 / m) * n;
+  gotoxy(1,wherey());
+  printf("Writing Startup-Code.......Sectors: %02d/%02d   Percent: %02.02f\%",(int)m,(int)n,per);
+  read(FileHandle,DataBuffer,512);
+  Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+  NextSector();
+  for (i=0;i<512;i++) DataBuffer[i]=0;
+  n++;
+ }
+ close(FileHandle);
+ gotoxy(1,wherey());
+ clreol();
+ printf("Writing Startup-Code.......success\n");
+
+ // Writing Kernel-Code
+
+ for (i=BlockSize;i>n;i--)
+ {
+  Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+  NextSector();
+ }
+ m =filelength(FH2)/512;
+ n = 0;
+ per=0;
+
+ while (!eof(FH2))
+ {
+//  per = (100 / m) * n;
+  gotoxy(1,wherey());
+  printf("Writing Kernel-Code.......Sectors: %02d/%02d   Percent: %02.02f\%",(int)n,(int)m,per);
+  read(FH2,DataBuffer,512);
+  Disk(3,DriveNr,Head,Track,Sector,1,&DataBuffer);
+  NextSector();
+  for (i=0;i<512;i++) DataBuffer[i]=0;
+  n++;
+ }
+ getch();
+ close(FH2);
+ gotoxy(1,wherey());
+ clreol();
+ printf("Writing Kernel-Code.......success\n");
+
+
+}
+
+void WritePartitionsector()
+{
+ int i;
+ BYTE Buffer[512];
+
+ Disk(2,DriveNr,0,0,1,1,&Buffer);
+ Buffer[0x1B2+PartitionNr*0x10]=PARTITION_TYP;
+ Disk(3,DriveNr,0,0,1,1,&Buffer);
+}
+
+void SetupBootmanager()
+{
+ int FileHandle,i,j;
+ char ch;
+ BYTE Buffer[512] = {0};
+
+ printf("\nWARNING: Bootmanager will be written to MBR.\n\n");
+ do ch=GetChar("Continue? (y/n) ");
+ while ((ch!='y')&&(ch!='Y')&&(ch!='n')&&(ch!='N'));
+ if ((ch=='n')||(ch=='N'))
+ {
+  printf("\n\nSetup aborted!\n");
+  exit(0);
+ }
+ printf("\n\nWriting Bootmanager to MBR...");
+ Disk(2,0x80,0,0,1,1,&Buffer);
+ if ((FileHandle = open(BOOTMAN_FILE,O_RDONLY|O_BINARY)) == -1)
+ {
+  printf("\n\nERROR: Missing BOOTMAN.DAT\n");
+  exit(1);
+ }
+ read(FileHandle,Buffer,446);
+ Disk(3,0x80,0,0,1,1,&Buffer);
+ lseek(FileHandle,512,SEEK_SET);
+ for (j=0;j<512;j++) Buffer[j]=0;
+ for (i=2;(read(FileHandle,Buffer,512)!=0);i++)
+ {
+  Disk(3,0x80,0,0,i,1,&Buffer);
+  for (j=0;j<512;j++) Buffer[j]=0;
+ }
+ close(FileHandle);
+ printf("success\n");
+}
+
+void KernelRecieveWizard(void)
+{
+
+}
+
+void main(int argc,char *argv[])
+{
+ char ch;
+ WindowsCheck();
+ Layout();
+ if (!strcmp(argv[1],"/b"))
+ {
+  SetupBootmanager();
+  exit(0);
+ }
+
+// if (windows == 1) argc = 0;
+ if (argc > 1)
+   para_drivesel = atoi(argv[1]);
+ if (argc > 2)
+   para_partsel = atoi(argv[2]);
+ if (argc > 3)
+   para_blocksel = atoi(argv[3]);
+ if (argc > 4)
+   para_confirm = 1;
+ if (argc > 5)
+   para_reboot = 1;
+
+ DriveSelection();
+ if (!krw)
+   PartitionSelection();
+
+ printf("\n\n");
+ if (!krw)
+ if (para_blocksel)
+ {
+   printf("Automatic Parameter selection --> Blksize : %d",para_blocksel);
+   BlockSize = para_blocksel;
+ }
+ else
+ {
+ do BlockSize=GetNumber("Choose Blocksize: ");
+ while ((BlockSize<1)||(BlockSize>255));
+ }
+
+ if (DriveNr>=0x80) printf("\n\nWARNING: All data of partition %d of the selected harddisk will be lost!\n\n",PartitionNr);
+ else if (krw) printf("\n\nWARNING: Kernel and Inodes will be overwritten!\n");
+ else printf("\n\nWARNING: All data of the selected floppydisk will be lost!\n\n");
+
+ if (!para_confirm)
+ {
+   do ch=GetChar("Continue? (y/n) ");
+   while ((ch!='y')&&(ch!='Y')&&(ch!='n')&&(ch!='N'));
+ }
+ else
+ {
+    printf("Continue? (y/n) Automatic Parameter selection --> YES\n");
+    ch = 'y';
+ }
+
+ if ((ch=='n')||(ch=='N'))
+ {
+  printf("\n\nSetup aborted!\n");
+  exit(0);
+ }
+
+ if (krw)
+   KernelRecieveWizard();
+ else
+ {
+
+
+ WriteBootsector();
+ WriteiNodes();
+ WriteKernel();
+ if (DriveNr>=0x80) WritePartitionsector();
+ printf("\n\n");
+ }
+}

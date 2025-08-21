@@ -1,0 +1,35 @@
+@echo off
+echo Linking utility (c) 1998 by Szeleney Robert
+echo Linking Object files...
+echo.
+
+del archives\*.a
+del archives\*.o
+
+echo Phase1: Building kernel archive...
+ar rcs archives\kernel_1.a keyboard.o vsprintf.o main.o mem.o ctype.o sched.o shell.o mmap.o
+ar rcs archives\kernel_2.a version.o trap.o pc.o msg.o console.o syslog.o ps.o misc.o ftpd.o
+copy kernel.o archives
+
+echo Phase2: Building block and char drivers/vfs archive...
+ar rcs archives\drivers.a floppy.o ide.o devices.o vfs.o skyfs.o msdos.o buffer.o list.o dma.o mouse.o
+
+echo Phase3: Building networking archive...
+ar rcs archives\net_1.a 3c509.o ne.o 
+ar rcs archives\net_2.a net_buff.o eth.o arp.o net.o ip.o icmp.o socket.o udp.o inet.o tftpd.o tcp.o
+
+echo Phase4: Building GUI/drivers archive..
+ar rcs archives\gui_drv.a gui.o vga.o svgadev.o vesa.o tvga.o twm.o newgui.o drawfunc.o
+
+echo Phase5: Building Applications/Library archive
+ar rcs archives\app_lib.a devman.o sysmon.o help.o library.o memmon.o newcon.o msgwin.o
+
+echo Phase6: Linking Kernel...
+cd archives
+ld -Map m -o kernel.sys -oformat binary -T l.scr kernel.o kernel_1.a kernel_2.a drivers.a net_1.a net_2.a app_lib.a gui_drv.a
+copy kernel.sys ..
+cd ..
+
+del *.
+
+

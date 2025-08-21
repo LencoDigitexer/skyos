@@ -1,0 +1,57 @@
+SKY Operating System V2.0  /  Release: V2.1.1a  
+Build: 25th May ,1999
+
+============================================================
+Compiling and Building SkyOS:
+============================================================
+
+Document created 01st June, 1999 by Szeleney Robert
+Last Update: 01st June, 1999 from Szeleney Robert
+
+Compilers/Tools you need:
+=========================
+
+1. NASM
+2. DJGPP (www.delorie.com)
+   gcc, gpp, ld, as, rhide
+3. TASM/TLINK
+
+Note: Path must be set to all this programms.
+      Maybe you have to install nasm in c:\nasm, djgpp in c:\djgpp.
+
+
+Development environemt you can use
+==================================
+
+1. DOS/WINDOWS with RHIDE (www.delorie.com)
+2. WINDOWS with MSVC++5.0/6.0
+
+Compiling of SkyOS
+==================
+
+1. Compile all c, cpp, s source files with rhide.
+   Flags for compiler are set in the project file.
+
+2. Compile asm files with asm.bat in c:\sky
+
+3. Start build.bat with links object files and execute setup programm.
+
+4. Write SkyOS with the setup programm to disk or floppy
+   ( I prefer installation on a partition, because it's faster than to 
+     floppy.)
+
+5. Restart computer
+
+Note: VGASetup V2.1.1a and older may have graphics problems 
+      if you use Windows NT.
+
+Questions
+=========
+
+For questions and comments email to bertlman@gmx.at
+
+
+
+
+
+

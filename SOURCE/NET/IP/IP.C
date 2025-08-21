@@ -1,0 +1,410 @@
+/************************************************************************/
+/* Sky Operating System V2
+/* Copyright (c) 1996 -1998 by Szeleney Robert
+/*
+/* Project Members: Szeleney Robert
+/*                  Resl Christian
+/*                  Hayrapetian Gregory
+/************************************************************************/
+/* File       : net\ip\ip.c
+/* Last Update: 09.12.1998
+/* Version    : alpha
+/* Coded by   : Szeleney Robert
+/* Docus      : Internet, Linux
+/*              IP:   rfc760.txt
+/************************************************************************/
+/* Definition:
+/*   Internet Protocol Driver for Version 4.
+/************************************************************************/
+#include "system.h"
+#include "netdev.h"
+#include "ip.h"
+#include "twm.h"
+#include "net.h"
+#include "socket.h"
+
+#define NULL (void*)0
+
+#define ETH_P_IP	0x0800		   /* Internet Protocol packet */
+
+unsigned int ip_count = 0;
+unsigned int net_ip_debug =0;
+unsigned int net_icmp_debug =0;
+
+struct s_ip_statistics
+{
+   unsigned int transmitted;
+   unsigned int received;
+   unsigned int received_errors_in_header;
+};
+
+struct s_ip_statistics ip_statistics = {0};
+
+static unsigned short int ntohs(unsigned short int x)
+{
+	__asm__("xchgb %b0,%h0"		/* swap bytes		*/
+		: "=q" (x)
+		:  "0" (x));
+	return x;
+}
+
+static unsigned short int htons(unsigned short int x)
+{
+	__asm__("xchgb %b0,%h0"		/* swap bytes		*/
+		: "=q" (x)
+		:  "0" (x));
+	return x;
+}
+
+extern struct s_net_device *active_device;
+
+void ip_dump(struct s_iphdr *ip)
+{
+  unsigned char buff[32];
+  unsigned char *ptr;
+  struct s_icmphdr *icmp;
+  int addr, len, i;
+
+  /* Dump the IP header. */
+  printk("IP: ihl=%d, version=%d, tos=%d, tot_len=%d\n",
+	   ip->ihl, ip->version, ip->tos, ntohs(ip->tot_len));
+  printk("    id=%X, ttl=%d, prot=%d, check=%X\n",
+	   ip->id, ip->ttl, ip->protocol, ip->check);
+  printk("    frag_off=%d\n", ip->frag_off);
+  printk("    soucre=%s ", in_ntoa(ip->saddr));
+  printk("dest=%s\n", in_ntoa(ip->daddr));
+}
+
+void icmp_dump(struct s_icmphdr *icmp)
+{
+    printk("ICMP Header:");
+    printk("Typ: %d  Code: %d    Checksum: %0004X",icmp->type, icmp->code, icmp->checksum);
+}
+
+/* This is a version of ip_compute_csum() optimized for IP headers, which
+   always checksum on 4 octet boundaries. */
+static inline unsigned short
+ip_fast_csum(unsigned char * buff, int wlen)
+{
+    unsigned long sum = 0;
+
+    if (wlen) {
+    	unsigned long bogus;
+	 __asm__("clc\n"
+		"1:\t"
+		"lodsl\n\t"
+		"adcl %3, %0\n\t"
+		"decl %2\n\t"
+		"jne 1b\n\t"
+		"adcl $0, %0\n\t"
+		"movl %0, %3\n\t"
+		"shrl $16, %3\n\t"
+		"addw %w3, %w0\n\t"
+		"adcw $0, %w0"
+	    : "=r" (sum), "=S" (buff), "=r" (wlen), "=a" (bogus)
+	    : "0"  (sum),  "1" (buff),  "2" (wlen));
+    }
+    return (~sum) & 0xffff;
+}
+
+/*
+ * This routine does all the checksum computations that don't
+ * require anything special (like copying or special headers).
+ */
+unsigned short
+ip_compute_csum(unsigned char * buff, int len)
+{
+  unsigned long sum = 0;
+
+  /* Do the first multiple of 4 bytes and convert to 16 bits. */
+  if (len > 3) {
+	__asm__("clc\n"
+	        "1:\t"
+	    	"lodsl\n\t"
+	    	"adcl %%eax, %%ebx\n\t"
+	    	"loop 1b\n\t"
+	    	"adcl $0, %%ebx\n\t"
+	    	"movl %%ebx, %%eax\n\t"
+	    	"shrl $16, %%eax\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
+	        : "=b" (sum) , "=S" (buff)
+	        : "0" (sum), "c" (len >> 2) ,"1" (buff)
+	        : "ax", "cx", "si", "bx" );
+  }
+  if (len & 2) {
+	__asm__("lodsw\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
+	        : "=b" (sum), "=S" (buff)
+	        : "0" (sum), "1" (buff)
+	        : "bx", "ax", "si");
+  }
+  if (len & 1) {
+	__asm__("lodsb\n\t"
+	    	"movb $0, %%ah\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
+	        : "=b" (sum), "=S" (buff)
+	        : "0" (sum), "1" (buff)
+	        : "bx", "ax", "si");
+  }
+  sum =~sum;
+  return(sum & 0xffff);
+}
+
+/* check the header of an incoming IP datagram. */
+int
+ip_csum(struct s_iphdr *iph)
+{
+  return ip_fast_csum((unsigned char *)iph, iph->ihl);
+}
+
+void ip_send_check(struct s_iphdr *iph)
+{
+   iph->check = 0;
+   iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
+}
+
+/*
+ * This routine builds the appropriate hardware/IP headers for
+ * the routine.
+ *
+ * Warning! There must already be a ARP Entry for the destination IP address.
+ */
+
+struct s_net_buff*
+ip_build_header(unsigned long saddr, unsigned long daddr,
+		struct s_net_device *dev, int type, int len, int tos, int ttl)
+{
+  struct s_iphdr *iphdr;
+  struct s_net_buff *buff;
+  struct s_ethhdr *ethhdr;
+  struct s_sockaddr_in *sa_daddr;
+
+  if (saddr == 0) 
+  	saddr = dev->pa_addr;
+
+  buff = (struct s_net_buff*)net_buff_alloc(len + sizeof(struct s_iphdr) +
+    sizeof(struct s_ethhdr));
+
+/* First, build the MAC header. */
+  ethhdr = (struct s_ethhdr*)buff->data;
+
+  /* Insert source hardware address (local machine address) */
+  memcpy(ethhdr->h_source, dev->dev_addr, 6);
+
+  /* Ask ARP-Cache for the destination address. This address must be known
+     already. */
+
+  if (!arp_get_mac(daddr, ethhdr->h_dest))
+  {
+    buff->arp.need = 1;
+    buff->arp.addr = daddr;
+  }
+
+  /* Insert Protocol type */
+  ethhdr->h_proto = htons(ETH_P_IP);
+
+/* Ok, MAC header set up. Now build the IP header */
+
+  iphdr = (struct s_iphdr *)(buff->data + sizeof(struct s_ethhdr));
+  iphdr->version  = 4;
+  iphdr->tos      = tos;
+  iphdr->frag_off = 0;
+  iphdr->ttl      = ttl;
+  iphdr->daddr    = daddr;
+  iphdr->saddr    = saddr;
+  iphdr->protocol = type;
+  iphdr->ihl      = 5;
+  iphdr->id       = htons(ip_count++);
+  iphdr->tot_len  = htons(len + 20);
+
+  ip_send_check(iphdr);
+
+  return buff;
+}
+
+unsigned int htonl(unsigned long int x)
+{
+	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
+		"rorl $16,%0\n\t"	/* swap words		*/
+		"xchgb %b0,%h0"		/* swap higher bytes	*/
+		:"=q" (x)
+		: "0" (x));
+	return x;
+}
+
+unsigned long in_aton(const char *str)
+{
+	unsigned long l;
+	unsigned int val;
+	int i;
+
+	l = 0;
+	for (i = 0; i < 4; i++) 
+	{
+		l <<= 8;
+		if (*str != '\0') 
+		{
+			val = 0;
+			while (*str != '\0' && *str != '.') 
+			{
+				val *= 10;
+				val += *str - '0';
+				str++;
+			}
+			l |= val;
+			if (*str != '\0') 
+				str++;
+		}
+	}
+	return(htonl(l));
+}
+
+void ip_init(void)
+{
+  struct s_net_device *act;
+
+  act = active_device;
+
+  // Test IP Address: 193.170.156.89
+  act->pa_addr = 1  << 24;
+  act->pa_addr += 0 << 16;
+  act->pa_addr += 0 << 8;
+  act->pa_addr += 130;
+
+  // Gateway IP Address: 193.170.156.1
+  act->pa_gateway = 0 << 24;
+  act->pa_gateway += 0 << 16;
+  act->pa_gateway += 0 << 8;
+  act->pa_gateway += 0;
+
+  printk("ip.c: Local IP Address   : %s", in_ntoa(act->pa_addr));
+  printk("ip.c: Gateway IP Address : %s", in_ntoa(act->pa_gateway));
+
+  register_family(AF_INET);
+}
+
+void ip_config(unsigned char*str, unsigned char *str2)
+{
+  struct s_net_device *act;
+
+  act = active_device;
+
+  // Test IP Address: 193.170.156.76
+  act->pa_addr    = in_aton(str);
+  act->pa_gateway = in_aton(str2);
+
+  printk("ip.c: Local IP Address   : %s", in_ntoa(act->pa_addr));
+  printk("ip.c: Gateway IP Address : %s", in_ntoa(act->pa_gateway));
+}
+
+void ip_stat(void)
+{
+  struct s_net_device *act;
+  struct twm_window w;
+  unsigned char str[255];
+  unsigned short ioaddr;
+  unsigned int flags;
+
+  act = active_device;
+
+  w.x = 100;
+  w.y = 90;
+  w.length = 400;
+  w.heigth = 200;
+  w.acty = 10;
+  strcpy(w.title, "IP Configuration and stat");
+  draw_window(&w);
+
+  save_flags(flags);
+  cli();
+
+  sprintf(str,"Local IP Address   : %s", in_ntoa(act->pa_addr));
+  out_window(&w, str);
+
+  sprintf(str,"Gateway IP Address : %s", in_ntoa(act->pa_gateway));
+  out_window(&w, str);
+  out_window(&w, "");
+
+  out_window(&w, "Statistics:");
+  sprintf(str,"Packets transmitted               : %d",ip_statistics.transmitted);
+  out_window(&w, str);
+  sprintf(str,"Packets received                  : %d",ip_statistics.received);
+  out_window(&w, str);
+  sprintf(str,"Packets recevied errors in header : %d",ip_statistics.received_errors_in_header);
+  out_window(&w, str);
+}
+
+/************************************************************************/
+/* Entry point from net for all received IP packets.                */
+/************************************************************************/
+int ip_rcv(struct s_net_buff *buff, struct s_net_device *dev)
+{
+   struct s_iphdr *iphdr;
+   int checksum;
+
+   /* Debug received IP packet to screen? */
+
+   ip_statistics.received++;
+
+   if (net_ip_debug)
+     ip_dump((struct s_iphdr*)(buff->data + sizeof(struct s_ethhdr)));
+
+   /* Tag IP header */
+   iphdr = (struct s_iphdr*)(buff->data + sizeof(struct s_ethhdr));
+
+   /* check for an IP packet and handle them */
+
+   /*
+    * Some specifications from the RFC files:
+    * RFC1122: 3.1.2.2 MUST silently discard any IP frame that fails the checksum.
+    * RFC1122: 3.1.2.3 MUST discard a frame with invalid source address
+    *
+    *	Is the datagram acceptable?
+    *
+    *	1.	Length at least the size of an ip header
+    *	2.	Version of 4
+    *	3.	Checksums correctly.
+    *	4.	Doesn't have a bogus length
+    */
+
+    /* Mabye we should set checksum to zero before calculating it? */
+
+    if (buff->size <sizeof(struct s_iphdr) || iphdr->ihl<5 ||
+     iphdr->version != 4 || ip_fast_csum((unsigned char *)iphdr, iphdr->ihl) !=0
+	|| buff->size < ntohs(iphdr->tot_len))
+	{
+		ip_statistics.received_errors_in_header++;
+		return(0);
+	}
+   buff->csum = iphdr->check;
+
+   /* check for an ICMP IP packet and handle them*/
+   if (iphdr->protocol == 0x01)    /* 0x01 = ICMP packet */
+   {
+       struct s_icmphdr *icmphdr;
+       icmphdr = (struct s_icmphdr*)(buff->data + sizeof(struct s_ethhdr) + (iphdr->ihl*4));
+
+       if (net_icmp_debug)
+            icmp_dump(icmphdr);
+
+       /* handel ICMP packet */
+       icmp_rcv(buff, dev);
+       return; /* leave ip_rcv function */
+   }
+
+   if (iphdr->protocol == 17)     /* 17 = UDP packet */
+   {
+     udp_rcv(buff, dev);
+     return;
+   }
+
+   if (iphdr->protocol == 6)     /* 6  = TCP packet */
+   {
+     tcp_rcv(buff, dev);
+     return;
+   }
+}
+

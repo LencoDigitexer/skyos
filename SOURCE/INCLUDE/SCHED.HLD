@@ -1,0 +1,146 @@
+#include "include\system.h"
+
+#define IO_BITMAP_SIZE	32
+#define NR_TASKS 10
+
+struct fpu_reg {
+	char sign;
+	char tag;
+	long exp;
+	unsigned sigl;
+	unsigned sigh;
+};
+
+struct i387_hard_struct {
+	long	cwd;
+	long	swd;
+	long	twd;
+	long	fip;
+	long	fcs;
+	long	foo;
+	long	fos;
+	long	st_space[20];	/* 8*10 bytes for each FP-reg = 80 bytes */
+};
+
+struct i387_soft_struct {
+	long	cwd;
+	long	swd;
+	long	twd;
+	long	fip;
+	long	fcs;
+	long	foo;
+	long	fos;
+	long    top;
+	struct fpu_reg	regs[8];	/* 8*16 bytes for each FP-reg = 128 bytes */
+	unsigned char	lookahead;
+	struct info	*info;
+	unsigned long	entry_eip;
+};
+
+union i387_union {
+	struct i387_hard_struct hard;
+	struct i387_soft_struct soft;
+};
+
+struct tss_struct {
+	unsigned short	back_link,__blh;
+	unsigned long	esp0;
+	unsigned short	ss0,__ss0h;
+	unsigned long	esp1;
+	unsigned short	ss1,__ss1h;
+	unsigned long	esp2;
+	unsigned short	ss2,__ss2h;
+	unsigned long	cr3;
+	unsigned long	eip;
+	unsigned long	eflags;
+	unsigned long	eax,ecx,edx,ebx;
+	unsigned long	esp;
+	unsigned long	ebp;
+	unsigned long	esi;
+	unsigned long	edi;
+	unsigned short	es, __esh;
+	unsigned short	cs, __csh;
+	unsigned short	ss, __ssh;
+	unsigned short	ds, __dsh;
+	unsigned short	fs, __fsh;
+	unsigned short	gs, __gsh;
+	unsigned short	ldt, __ldth;
+	unsigned short	trace, bitmap;
+	unsigned long	io_bitmap[IO_BITMAP_SIZE+1];
+	unsigned long	tr;
+	unsigned long	cr2, trap_no, error_code;
+	union i387_union i387;
+
+};
+
+#define FIRST_TSS_ENTRY 8
+#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+1)
+#define _TSS(n) ((((unsigned long) n)<<4)+(FIRST_TSS_ENTRY<<3))
+#define _LDT(n) ((((unsigned long) n)<<4)+(FIRST_LDT_ENTRY<<3))
+#define load_TR(n) __asm__("ltr %%ax": /* no output */ :"a" (_TSS(n)))
+#define load_ldt(n) __asm__("lldt %%ax": /* no output */ :"a" (_LDT(n)))
+#define store_TR(n) \
+__asm__("str %%ax\n\t" \
+	"subl %2,%%eax\n\t" \
+	"shrl $4,%%eax" \
+	:"=a" (n) \
+	:"0" (0),"i" (FIRST_TSS_ENTRY<<3))
+
+struct task_struct {
+	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
+	long counter;
+	unsigned long flags;	/* per process flags, defined below */
+	unsigned long saved_kernel_stack;
+	unsigned long kernel_stack_page;
+	unsigned long start_code,end_code,end_data,start_brk,brk,start_stack,start_mmap;
+	unsigned long arg_start, arg_end, env_start, env_end;
+/* ldt for this task - used by Wine.  If NULL, default_ldt is used */
+	struct desc_struct *ldt;
+/* tss for this task */
+	struct tss_struct tss;
+};
+
+/*
+ * Per process flags
+ */
+#define PF_ALIGNWARN	0x00000001	/* Print alignment warning msgs */
+					/* Not implemented yet, only for 486*/
+#define PF_PTRACED	0x00000010	/* set if ptrace (0) has been called. */
+#define PF_TRACESYS	0x00000020	/* tracing system calls */
+
+/*
+ * cloning flags:
+ */
+#define CSIGNAL		0x000000ff	/* signal mask to be sent at exit */
+#define COPYVM		0x00000100	/* set if VM copy desired (like normal fork()) */
+#define COPYFD		0x00000200	/* set if fd's should be copied, not shared (NI) */
+
+/*
+ *  INIT_TASK is used to set up the first task table, touch at
+ * your own risk!. Base=0, limit=0x1fffff (=2MB)
+ */
+#define INIT_TASK \
+/* state etc */	{ 0,15,0, \
+                0,(unsigned long) &init_kernel_stack, \
+                0,0,0,0,0,0,0,0,0,0,0, \
+/* ldt */	(void*)0, \
+/*tss*/	{0,0, \
+	 sizeof(init_kernel_stack) + (long) &init_kernel_stack, KERNEL_DS, 0, \
+	 0,0,0,0,0,0, \
+	 0x1000, \
+	 0,0,0,0,0,0,0,0,0,0, \
+	 USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0, \
+	 _LDT(0),0, \
+	 0, 0x8000, \
+/* ioperm */ 	{~0, }, \
+	 _TSS(0), 0, 0,0, \
+/* 387 state */	{ { 0, }, } \
+	} \
+}
+
+extern struct task_struct init_task;
+extern struct task_struct *task[NR_TASKS];
+extern struct task_struct *last_task_used_math;
+extern struct task_struct *current;
+
+

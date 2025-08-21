@@ -1,0 +1,9 @@
+Howto compile SkyOS with NT
+=================================
+
+NASM  muss in c:\nasm  installiert sein.
+DJGPP muss in c:\djgpp installiert sein.
+
+In %winnt%\system32\autoexec.nt
+
+  set djgpp=c:\djgpp\djgpp.env
